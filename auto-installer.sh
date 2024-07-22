@@ -1,48 +1,45 @@
 #!/bin/bash
 
-# Ask for the domain and email
-read -p "Enter your domain: " domain
-read -p "Enter your email for SSL certificate: " email
+# تحديث النظام وترقية الحزم
+sudo apt update
+sudo apt upgrade -y
 
-# Create a directory to store the script files
-mkdir anub-live-hls
-cd anub-live-hls
+# تثبيت المتطلبات الأساسية
+sudo apt install -y build-essential libpcre3 libpcre3-dev libssl-dev zlib1g-dev
 
-# Install required packages
-echo "Updating package lists and installing required packages..."
-sudo apt-get update
-sudo apt-get install wget unzip software-properties-common dpkg-dev git make gcc automake build-essential zlib1g-dev libpcre3 libpcre3-dev libssl-dev libxslt1-dev libxml2-dev libgd-dev libgeoip-dev libgoogle-perftools-dev libperl-dev pkg-config autotools-dev -y
+# تحميل Nginx و RTMP module
+cd /usr/local/src
+sudo git clone https://github.com/nginx/nginx.git
+sudo git clone https://github.com/arut/nginx-rtmp-module.git
 
-# Download and install Nginx with RTMP module
-echo "Downloading and installing Nginx with RTMP module..."
-wget https://nginx.org/download/nginx-1.22.0.tar.gz
-tar -zxvf nginx-1.22.0.tar.gz
-git clone https://github.com/arut/nginx-rtmp-module.git
-cd nginx-1.22.0
-./configure --add-module=../nginx-rtmp-module --with-http_ssl_module
-make
+# تثبيت Nginx مع إضافة وحدة RTMP
+cd nginx
+sudo ./auto/configure --add-module=../nginx-rtmp-module
+sudo make
 sudo make install
-cd ..
 
-# Configure Nginx
-echo "Configuring Nginx..."
-sudo tee /usr/local/nginx/conf/nginx.conf <<EOL
+# طلب معلومات من المستخدم
+read -p "أدخل اسم النطاق الخاص بك (مثلاً: example.com): " DOMAIN
+read -p "أدخل البريد الإلكتروني لشهادة SSL: " EMAIL
+
+# تكوين Nginx
+NGINX_CONF="/usr/local/nginx/conf/nginx.conf"
+sudo tee $NGINX_CONF > /dev/null <<EOL
 worker_processes auto;
 
 events {
     worker_connections 1024;
     multi_accept on;
 }
-
 http {
     include       mime.types;
     default_type  application/octet-stream;
 
     server {
         listen 80;
-        server_name $domain;
+        server_name $DOMAIN;
 
-        # Redirect HTTP to HTTPS
+        # إعادة توجيه HTTP إلى HTTPS
         return 301 https://\$host\$request_uri;
 
         location / {
@@ -57,6 +54,14 @@ http {
             }
             root /usr/local/nginx/html;
             add_header Cache-Control no-cache;
+            # التحقق من الدومين المرجعي
+            # if (\$http_referer !~* ^https?://(www\.)?$DOMAIN) {
+            #     return 403;
+            # }
+
+            # or
+            # valid_referers none blocked $DOMAIN *.${DOMAIN} another_domain.com;
+            # if (\$invalid_referer) {return 403;}
         }
     }
 }
@@ -70,33 +75,32 @@ rtmp {
             live on;
             record off;
 
-            # HLS settings
+            # إعدادات HLS
             hls on;
             hls_path /usr/local/nginx/html/hls;
             hls_fragment 3s;
             hls_playlist_length 60s;
+
+            # يتيح لنا استبدال الأجزاء من المسار باسم التدفق
             hls_nested off;
+
+            # إعدادات البث بجودة واحدة (512k)
+            # hls_variant _medium BANDWIDTH=512000;
+
+            # تنفيذ ffmpeg لتحويل الفيديو إلى جودة واحدة (512k)
+            # exec ffmpeg -i rtmp://localhost/live/\$name \
+            #     -codec:v libx264 -b:v 512k -maxrate 512k -bufsize 1024k -vf "scale=w=1280:h=720:force_original_aspect_ratio=decrease" \
+            #     -codec:a aac -b:a 128k \
+            #     -f flv rtmp://localhost/hls/\$name_medium;
         }
     }
 }
 EOL
 
-# Install FFmpeg
-echo "Downloading and installing FFmpeg..."
-git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg
-cd ffmpeg
-./configure
-make
-sudo make install
-cd ..
+# تثبيت Certbot وتكوين SSL
+sudo apt install -y certbot python3-certbot-nginx
 
-# Install and configure Certbot for SSL
-echo "Installing Certbot and configuring SSL certificate..."
-sudo apt-get install certbot python3-certbot-nginx -y
-sudo certbot --nginx -d $domain --email $email --agree-tos --non-interactive
+# طلب شهادة SSL وتكوين Nginx
+sudo certbot --nginx -d $DOMAIN -m $EMAIL --agree-tos --no-eff-email
 
-# Start Nginx
-echo "Starting Nginx..."
-sudo /usr/local/nginx/sbin/nginx
-
-echo "Installation and configuration completed."
+echo "تم إعداد Nginx مع وحدة RTMP، تكوين ملف nginx.conf بنجاح، وتثبيت شهادة SSL."
