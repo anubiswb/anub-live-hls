@@ -1,67 +1,57 @@
 #!/bin/bash
 
-# تحديث النظام وترقية الحزم
-sudo apt update
-sudo apt upgrade -y
+# تحديث النظام وتثبيت الحزم الضرورية
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential libpcre3 libpcre3-dev libssl-dev zlib1g-dev wget git certbot python3-certbot-nginx
 
-# تثبيت المتطلبات الأساسية
-sudo apt install -y build-essential libpcre3 libpcre3-dev libssl-dev zlib1g-dev
+# تنزيل Nginx وإصداره
+wget http://nginx.org/download/nginx-1.18.0.tar.gz
+tar zxvf nginx-1.18.0.tar.gz
 
-# تحميل Nginx و RTMP module
-cd /usr/local/src
-sudo git clone https://github.com/nginx/nginx.git
-sudo git clone https://github.com/arut/nginx-rtmp-module.git
+# تنزيل وحدة RTMP
+git clone https://github.com/arut/nginx-rtmp-module.git
 
-# تثبيت Nginx مع إضافة وحدة RTMP
-cd nginx
-sudo ./auto/configure --add-module=../nginx-rtmp-module
-sudo make
+# بناء وتثبيت Nginx مع وحدة RTMP
+cd nginx-1.18.0
+./configure --add-module=../nginx-rtmp-module --with-http_ssl_module
+make
 sudo make install
 
-# طلب معلومات من المستخدم
-read -p "أدخل اسم النطاق الخاص بك (مثلاً: example.com): " DOMAIN
-read -p "أدخل البريد الإلكتروني لشهادة SSL: " EMAIL
-
-# تكوين Nginx
-NGINX_CONF="/usr/local/nginx/conf/nginx.conf"
-sudo tee $NGINX_CONF > /dev/null <<EOL
-worker_processes auto;
+# إعداد Nginx
+sudo cp /usr/local/nginx/conf/nginx.conf /usr/local/nginx/conf/nginx.conf.bak
+sudo tee /usr/local/nginx/conf/nginx.conf <<EOF
+worker_processes  1;
 
 events {
-    worker_connections 1024;
-    multi_accept on;
+    worker_connections  1024;
 }
+
 http {
     include       mime.types;
     default_type  application/octet-stream;
+    sendfile        on;
+    keepalive_timeout  65;
 
     server {
-        listen 80;
-        server_name $DOMAIN;
-
-        # إعادة توجيه HTTP إلى HTTPS
-        return 301 https://\$host\$request_uri;
+        listen       80;
+        server_name  localhost;
 
         location / {
             root   html;
             index  index.html index.htm;
         }
 
-        location /hls/ {
+        location /hls {
             types {
                 application/vnd.apple.mpegurl m3u8;
                 video/mp2t ts;
             }
-            root /usr/local/nginx/html;
+            root /var/www;
             add_header Cache-Control no-cache;
-            # التحقق من الدومين المرجعي
-            # if (\$http_referer !~* ^https?://(www\.)?$DOMAIN) {
-            #     return 403;
-            # }
-
-            # or
-            # valid_referers none blocked $DOMAIN *.${DOMAIN} another_domain.com;
-            # if (\$invalid_referer) {return 403;}
+            valid_referers none blocked localhost server_names ~\.example\.com$;
+            if (\$invalid_referer) {
+                return 403;
+            }
         }
     }
 }
@@ -75,32 +65,124 @@ rtmp {
             live on;
             record off;
 
-            # إعدادات HLS
             hls on;
-            hls_path /usr/local/nginx/html/hls;
-            hls_fragment 3s;
-            hls_playlist_length 60s;
-
-            # يتيح لنا استبدال الأجزاء من المسار باسم التدفق
-            hls_nested off;
-
-            # إعدادات البث بجودة واحدة (512k)
-            # hls_variant _medium BANDWIDTH=512000;
-
-            # تنفيذ ffmpeg لتحويل الفيديو إلى جودة واحدة (512k)
-            # exec ffmpeg -i rtmp://localhost/live/\$name \
-            #     -codec:v libx264 -b:v 512k -maxrate 512k -bufsize 1024k -vf "scale=w=1280:h=720:force_original_aspect_ratio=decrease" \
-            #     -codec:a aac -b:a 128k \
-            #     -f flv rtmp://localhost/hls/\$name_medium;
+            hls_path /var/www/hls;
+            hls_fragment 3;
+            hls_playlist_length 60;
+            hls_continuous on;
+            hls_cleanup on;
         }
     }
 }
-EOL
+EOF
 
-# تثبيت Certbot وتكوين SSL
-sudo apt install -y certbot python3-certbot-nginx
+# إنشاء دليل للبث وتحديد الأذونات المناسبة
+sudo mkdir -p /var/www/hls
+sudo chown -R www-data:www-data /var/www/hls
 
-# طلب شهادة SSL وتكوين Nginx
-sudo certbot --nginx -d $DOMAIN -m $EMAIL --agree-tos --no-eff-email
+# إعداد خدمة النظام لبدء وإدارة Nginx
+sudo tee /etc/systemd/system/nginx.service <<EOF
+[Unit]
+Description=The NGINX HTTP and reverse proxy server
+After=syslog.target network.target remote-fs.target nss-lookup.target
 
-echo "تم إعداد Nginx مع وحدة RTMP، تكوين ملف nginx.conf بنجاح، وتثبيت شهادة SSL."
+[Service]
+Type=forking
+PIDFile=/usr/local/nginx/logs/nginx.pid
+ExecStartPre=/usr/local/nginx/sbin/nginx -t
+ExecStart=/usr/local/nginx/sbin/nginx
+ExecReload=/usr/local/nginx/sbin/nginx -s reload
+ExecStop=/bin/kill -s QUIT \$MAINPID
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# تفعيل وبدء خدمة Nginx
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+# طلب الدومين وعنوان البريد الإلكتروني للحصول على شهادة SSL
+read -p "Enter your domain name (e.g., example.com): " domain
+read -p "Enter your email address for SSL certificate: " email
+
+# الحصول على شهادة SSL باستخدام Let's Encrypt
+sudo certbot --nginx -d $domain --email $email --agree-tos --non-interactive
+
+# تعديل إعدادات Nginx لاستخدام SSL
+sudo tee /usr/local/nginx/conf/nginx.conf <<EOF
+worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen 80;
+        server_name $domain;
+        return 301 https://\$host\$request_uri;
+    }
+
+    server {
+        listen       443 ssl;
+        server_name  $domain;
+
+        ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers on;
+        ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+
+        location /hls {
+            types {
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+            }
+            root /var/www;
+            add_header Cache-Control no-cache;
+            valid_referers none blocked localhost server_names ~\.$domain$;
+            if (\$invalid_referer) {
+                return 403;
+            }
+        }
+    }
+}
+
+rtmp {
+    server {
+        listen 1935;
+        chunk_size 4096;
+
+        application live {
+            live on;
+            record off;
+
+            hls on;
+            hls_path /var/www/hls;
+            hls_fragment 3;
+            hls_playlist_length 60;
+            hls_continuous on;
+            hls_cleanup on;
+        }
+    }
+}
+EOF
+
+# إعادة تحميل Nginx لتطبيق التغييرات
+sudo systemctl reload nginx
+
+echo "Nginx with RTMP module and HLS setup is complete. SSL certificate has been configured for $domain."
